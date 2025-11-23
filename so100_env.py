@@ -9,8 +9,17 @@ import os
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, Sequence
 import mujoco
+
+ROBOT_JOINT_NAMES = [
+    "Rotation",
+    "Pitch",
+    "Elbow",
+    "Wrist_Pitch",
+    "Wrist_Roll",
+    "Jaw",
+]
 
 
 class ParameterizedSO100Env(gym.Env):
@@ -50,6 +59,9 @@ class ParameterizedSO100Env(gym.Env):
         render_mode: Optional[str] = None,
         control_freq: int = 50,
         simulation_params: Optional[Dict[str, float]] = None,
+        joint_offsets: Optional[Sequence[float]] = None,
+        joint_scales: Optional[Sequence[float]] = None,
+        joint_directions: Optional[Sequence[float]] = None,
     ):
         """
         Initialize the SO-100 environment.
@@ -60,6 +72,9 @@ class ParameterizedSO100Env(gym.Env):
             render_mode: Rendering mode
             control_freq: Control frequency (Hz)
             simulation_params: Custom simulation parameters
+            joint_offsets: Per-joint angle offsets aligning sim zeros to hardware
+            joint_scales: Per-joint scale factors (e.g., deg/rad) for hardware
+            joint_directions: +1/-1 multipliers to match hardware rotation direction
         """
         super().__init__()
         
@@ -67,6 +82,17 @@ class ParameterizedSO100Env(gym.Env):
         self.render_mode = render_mode
         self.control_freq = control_freq
         self.dt = 1.0 / control_freq
+
+        self.robot_joint_names = ROBOT_JOINT_NAMES
+        self.n_robot_joints = len(self.robot_joint_names)
+        self.joint_offsets = np.zeros(self.n_robot_joints, dtype=np.float64)
+        self.joint_scales = np.ones(self.n_robot_joints, dtype=np.float64)
+        self.joint_directions = np.ones(self.n_robot_joints, dtype=np.float64)
+        self.set_joint_calibration(
+            offsets=joint_offsets,
+            scales=joint_scales,
+            directions=joint_directions,
+        )
         
         # Simulation parameters (start with defaults)
         self.sim_params = self.DEFAULT_PARAMS.copy()
@@ -165,6 +191,104 @@ class ParameterizedSO100Env(gym.Env):
             # Velocity gain is typically in gainprm[1] for position actuators
             
         # Control delay would be handled in step() by buffering actions
+    
+    # ------------------------------------------------------------------ #
+    # Joint calibration helpers
+    # ------------------------------------------------------------------ #
+
+    def set_joint_calibration(
+        self,
+        offsets: Optional[Sequence[float]] = None,
+        scales: Optional[Sequence[float]] = None,
+        directions: Optional[Sequence[float]] = None,
+    ) -> None:
+        """
+        Store calibration data that maps simulator joint angles to hardware.
+
+        Args:
+            offsets: additive offsets (radians) applied before scaling
+            scales: multiplicative factors (e.g., rad→deg) applied after offsets
+            directions: +1/-1 multipliers aligning rotation direction
+        """
+        if offsets is not None:
+            offsets_arr = np.asarray(offsets, dtype=np.float64)
+            self._validate_joint_vector(offsets_arr, "offsets")
+            self.joint_offsets = offsets_arr
+
+        if scales is not None:
+            scales_arr = np.asarray(scales, dtype=np.float64)
+            self._validate_joint_vector(scales_arr, "scales")
+            if np.any(scales_arr == 0):
+                raise ValueError("Joint scale values must be non-zero.")
+            self.joint_scales = scales_arr
+
+        if directions is not None:
+            directions_arr = np.asarray(directions, dtype=np.float64)
+            self._validate_joint_vector(directions_arr, "directions")
+            self.joint_directions = directions_arr
+
+    def get_joint_calibration(self) -> Dict[str, np.ndarray]:
+        """Return the current calibration vectors."""
+        return {
+            "offsets": self.joint_offsets.copy(),
+            "scales": self.joint_scales.copy(),
+            "directions": self.joint_directions.copy(),
+            "joint_names": tuple(self.robot_joint_names),
+        }
+
+    def sim_to_real_joint_positions(
+        self,
+        sim_qpos: Sequence[float],
+        as_dict: bool = False,
+    ):
+        """
+        Map simulator joint angles to real-robot setpoints.
+
+        Args:
+            sim_qpos: Iterable of simulator joint angles (radians)
+            as_dict: When True, return {joint_name: value} instead of np.ndarray
+        """
+        sim = np.asarray(sim_qpos, dtype=np.float64)
+        self._validate_joint_vector(sim, "sim_qpos", exact_length=False)
+        sim = sim[: self.n_robot_joints]
+        real = (sim + self.joint_offsets) * self.joint_scales * self.joint_directions
+        if as_dict:
+            return dict(zip(self.robot_joint_names, real))
+        return real
+
+    def real_to_sim_joint_positions(
+        self,
+        real_qpos: Sequence[float],
+        as_dict: bool = False,
+    ):
+        """
+        Map real-robot joint readings into simulator coordinates (radians).
+        """
+        real = np.asarray(real_qpos, dtype=np.float64)
+        self._validate_joint_vector(real, "real_qpos")
+        sim = (real / (self.joint_scales * self.joint_directions)) - self.joint_offsets
+        if as_dict:
+            return dict(zip(self.robot_joint_names, sim))
+        return sim
+
+    def _validate_joint_vector(
+        self,
+        vec: np.ndarray,
+        label: str,
+        exact_length: bool = True,
+    ) -> None:
+        """Ensure vectors meant for calibration have expected length."""
+        if vec.ndim != 1:
+            raise ValueError(f"{label} must be 1-D, got shape {vec.shape}.")
+        if exact_length and vec.shape[0] != self.n_robot_joints:
+            raise ValueError(
+                f"{label} must have {self.n_robot_joints} entries "
+                f"(one per joint), got {vec.shape[0]}."
+            )
+        if not exact_length and vec.shape[0] < self.n_robot_joints:
+            raise ValueError(
+                f"{label} must contain at least {self.n_robot_joints} joint values."
+            )
         
     def set_parameters(self, params: Dict[str, float]):
         """
