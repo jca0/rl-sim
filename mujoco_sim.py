@@ -3,6 +3,8 @@ import mujoco
 from mujoco import MjModel, MjData, mj_resetDataKeyframe
 import mujoco.viewer as viewer
 
+JOINT_NAMES = ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
+
 model = MjModel.from_xml_path("trs_so_arm100/scene.xml")
 data = MjData(model)
 
@@ -14,15 +16,26 @@ def reset_to_keyframe(name: str) -> bool:
         return True
     return False
 
+
+def joint_qpos_snapshot() -> dict[str, float]:
+    """Return current joint positions keyed by joint name."""
+    return {name: float(data.qpos[idx]) for idx, name in enumerate(JOINT_NAMES)}
+
+
 reset_to_keyframe("rest_with_cube")
 
 with viewer.launch_passive(model, data) as gui:
     start = time.time()
+    last_log = start
     while gui.is_running():
         step_start = time.time()
-        
         mujoco.mj_step(model, data)
         gui.sync()
+
+        # Log joint positions roughly once per second
+        if time.time() - last_log >= 1.0:
+            print("Joint qpos:", joint_qpos_snapshot(), flush=True)
+            last_log = time.time()
 
         # Rudimentary time keeping to match real-time
         time_until_next_step = model.opt.timestep - (time.time() - step_start)
