@@ -6,6 +6,8 @@
 
 Use the “rest” keyframe as your shared reference:
 
+**sim qpos:** {'Rotation': 8.554143758417244e-10, 'Pitch': -3.32002662172713, 'Elbow': 3.118134788813849, 'Wrist_Pitch': 1.1813556248365669, 'Wrist_Roll': 3.900751847099726e-06, 'Jaw': -0.17400093667795333}
+
 1. **Sim side:** Reset to `rest_with_cube` (or `rest`) so the MuJoCo joints take the `qpos` values `[0, -3.32, 3.11, 1.18, 0, -0.174]`. Record `sim_qpos = data.qpos[:6]`.
 
 2. **Robot side:** Move the physical SO-100 into its mechanical rest pose (same one used when capturing that keyframe). Read each joint encoder value (`θ_real_rest`) in the units your controller understands.
