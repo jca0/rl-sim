@@ -20,6 +20,7 @@ with viewer.launch_passive(model, data) as gui:
     start = time.time()
     while gui.is_running():
         step_start = time.time()
+        
         mujoco.mj_step(model, data)
         gui.sync()
 
