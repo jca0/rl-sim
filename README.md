@@ -1,5 +1,10 @@
 # rl-sim
-1. jing gets sim side working (pick place cube, push cube), polish sim -> real pipeline
-2. jing train an RL policy in sim
-3. ali does the rest
-    - RL loop with sim and real
+**running sim RL script:**  
+example:  
+```bash
+python -m rl_env.train_cube_robot_env.py \
+    --total-timesteps 2_000_000 \
+    --video-interval 200_000 \
+    --save-policy
+```
+saves the outputs to `runs/` folder
