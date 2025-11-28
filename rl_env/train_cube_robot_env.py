@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import trange
 
 import rl_env  # noqa: F401  # registers the env
 
@@ -254,7 +255,11 @@ def main() -> None:
     num_updates = args.total_timesteps // (NUM_STEPS * NUM_ENVS)
     start_time = time.time()
 
-    for update in range(1, num_updates + 1):
+    progress = trange(1, num_updates + 1, desc="PPO updates", dynamic_ncols=True)
+    sps_value = 0
+    last_loss = 0.0
+
+    for update in progress:
         for step in range(NUM_STEPS):
             obs[step] = next_obs
             dones[step] = next_done
@@ -357,7 +362,8 @@ def main() -> None:
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl, global_step)
         writer.add_scalar("losses/clipfrac", clipfrac, global_step)
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        sps_value = int(global_step / (time.time() - start_time))
+        writer.add_scalar("charts/SPS", sps_value, global_step)
 
         if next_video_step is not None and global_step >= next_video_step:
             artifact = record_rollout(
@@ -371,6 +377,9 @@ def main() -> None:
             writer.add_scalar("eval/episode_return", artifact.episode_return, global_step)
             print(f"[video] step={global_step} -> {artifact.video_path}")
             next_video_step += args.video_interval
+
+        last_loss = loss.item()
+        progress.set_postfix({"loss": f"{last_loss:.3f}", "SPS": sps_value})
 
     envs.close()
     writer.close()
