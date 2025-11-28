@@ -89,7 +89,7 @@ class RedCubePickEnv(gym.Env):
             self.model, mujoco.mjtObj.mjOBJ_BODY, "Moving_Jaw"
         )
         self._home_key_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_KEY, "home_with_cube"
+            self.model, mujoco.mjtObj.mjOBJ_KEY, "rest_with_cube"
         )
 
         # Locate the cube's freejoint slices for direct qpos/qvel edits.
@@ -226,7 +226,10 @@ class RedCubePickEnv(gym.Env):
 
     def close(self) -> None:
         if self._renderer is not None:
-            self._renderer.free()
+            if hasattr(self._renderer, "close"):
+                self._renderer.close()
+            elif hasattr(self._renderer, "free"):
+                self._renderer.free()
             self._renderer = None
 
     # ------------------------------------------------------ Logging interfaces
