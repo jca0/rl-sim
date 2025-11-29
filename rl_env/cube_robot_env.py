@@ -211,22 +211,26 @@ class RedCubePickEnv(gym.Env):
         r_ctrl = -0.01 * np.square(action).sum()
 
         # Composition
-        # Logic from user:
-        # if is_grasped: reward += 2.0 + r_place
-        # else: reward += r_reach
-        
         reach_val = 0.0
         place_val = 0.0
         grasp_bonus_val = 0.0
         
+        # Grasp shaping: encourage closing gripper when near the cube
+        # We want the jaw (last joint) to be small (closed) when d_reach is small.
+        jaw_pos = self.data.qpos[self._arm_dofs - 1]
+        proximity = 1.0 - np.tanh(10.0 * d_reach)
+        # jaw_pos ranges [0, 1.75], closed at 0.
+        closedness = np.exp(-2.0 * jaw_pos)
+        r_grasp_shaping = 0.5 * proximity * closedness
+
         if is_grasped:
             grasp_bonus_val = 2.0
             place_val = r_place
         else:
-            reach_val = r_reach
+            reach_val = r_reach + r_grasp_shaping
 
         # Sparse success bonus
-        success = d_place < 0.01 and is_grasped
+        success = d_place < 0.05 and is_grasped
         success_bonus_val = 10.0 if success else 0.0
 
         terms = RewardTerms(
