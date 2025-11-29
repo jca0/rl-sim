@@ -26,13 +26,14 @@ TARGET_OFFSET = np.array([-0.05, 0.0, 0.0], dtype=np.float32)  # 5 cm to the lef
 @dataclass
 class RewardTerms:
     reach: float
-    transport: float
-    lift_bonus: float
+    place: float
+    ctrl: float
+    grasp_bonus: float
     success_bonus: float
 
     @property
     def total(self) -> float:
-        return self.reach + self.transport + self.lift_bonus + self.success_bonus
+        return self.reach + self.place + self.ctrl + self.grasp_bonus + self.success_bonus
 
 
 class RedCubePickEnv(gym.Env):
@@ -45,7 +46,7 @@ class RedCubePickEnv(gym.Env):
         model_path: Optional[str | Path] = None,
         render_mode: Optional[str] = None,
         frame_skip: int = 5,
-        max_episode_steps: int = 200,
+        max_episode_steps: int = 600,  # Changed to 600 (6 seconds)
     ) -> None:
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
             raise ValueError(f"Unsupported render_mode '{render_mode}'")
@@ -89,7 +90,7 @@ class RedCubePickEnv(gym.Env):
             self.model, mujoco.mjtObj.mjOBJ_BODY, "Moving_Jaw"
         )
         self._home_key_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_KEY, "rest_with_cube"
+            self.model, mujoco.mjtObj.mjOBJ_KEY, "home_with_cube"
         )
 
         # Locate the cube's freejoint slices for direct qpos/qvel edits.
@@ -150,7 +151,8 @@ class RedCubePickEnv(gym.Env):
 
         self._elapsed_steps += 1
 
-        reward_terms, success = self._compute_reward()
+        # Pass action to compute_reward for regularization
+        reward_terms, success = self._compute_reward(action)
         observation = self._get_obs()
         terminated = success
         truncated = self._elapsed_steps >= self._max_episode_steps
@@ -185,30 +187,54 @@ class RedCubePickEnv(gym.Env):
             ]
         ).astype(np.float32)
 
-    def _compute_reward(self) -> Tuple[RewardTerms, bool]:
+    def _compute_reward(self, action: np.ndarray) -> Tuple[RewardTerms, bool]:
         assert self._cube_spawn_pos is not None
         assert self._target_pos is not None
 
         cube_pos = self.data.xpos[self._cube_body_id]
         ee_pos = self.data.xpos[self._ee_body_id]
 
-        reach_dist = np.linalg.norm(ee_pos - cube_pos)
-        transport_dist = np.linalg.norm(cube_pos - self._target_pos)
+        # Distance definitions
+        d_reach = np.linalg.norm(ee_pos - cube_pos)
+        d_place = np.linalg.norm(cube_pos - self._target_pos)
 
-        reach_term = -0.5 * reach_dist
-        transport_term = -1.5 * transport_dist
+        # Check grasp status (Logic: is cube lifted off table?)
+        # Threshold height 0.05 (table is at 0 in simulation world usually, but here cube starts at 0.03)
+        # User specified: is_grasped = pos_cube[2] > 0.05
+        is_grasped = cube_pos[2] > 0.05
 
-        lift_height = cube_pos[2] - self._cube_spawn_pos[2]
-        lift_bonus = 0.3 if lift_height > 0.02 else 0.0
+        # Calculate components
+        r_reach = 1 - np.tanh(10.0 * d_reach)
+        r_place = 1 - np.tanh(10.0 * d_place)
+        
+        # Action penalty
+        r_ctrl = -0.01 * np.square(action).sum()
 
-        success = transport_dist < 0.02 and lift_height > 0.015
-        success_bonus = 10.0 if success else 0.0
+        # Composition
+        # Logic from user:
+        # if is_grasped: reward += 2.0 + r_place
+        # else: reward += r_reach
+        
+        reach_val = 0.0
+        place_val = 0.0
+        grasp_bonus_val = 0.0
+        
+        if is_grasped:
+            grasp_bonus_val = 2.0
+            place_val = r_place
+        else:
+            reach_val = r_reach
+
+        # Sparse success bonus
+        success = d_place < 0.01 and is_grasped
+        success_bonus_val = 10.0 if success else 0.0
 
         terms = RewardTerms(
-            reach=reach_term,
-            transport=transport_term,
-            lift_bonus=lift_bonus,
-            success_bonus=success_bonus,
+            reach=reach_val,
+            place=place_val,
+            ctrl=r_ctrl,
+            grasp_bonus=grasp_bonus_val,
+            success_bonus=success_bonus_val,
         )
 
         return terms, success
@@ -242,4 +268,3 @@ class RedCubePickEnv(gym.Env):
 
 
 __all__ = ["RedCubePickEnv"]
-

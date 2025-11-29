@@ -28,7 +28,7 @@ VIDEO_FPS = 30
 EVAL_MAX_STEPS = 400
 
 # Fixed PPO hyperparameters (kept out of CLI to stay simple).
-NUM_ENVS = 4
+NUM_ENVS = 8
 NUM_STEPS = 256
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
@@ -47,8 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exp-name", type=str, default="red_cube_pick")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto", help="cpu, cuda, or auto")
-    parser.add_argument("--total-timesteps", type=int, default=500_000)
-    parser.add_argument("--video-interval", type=int, default=50_000,
+    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
+    parser.add_argument("--video-interval", type=int, default=100_000,
                         help="Steps between saved rollout videos (0 disables).")
     parser.add_argument("--output-dir", type=str, default="runs")
     parser.add_argument("--save-policy", action="store_true", help="Persist final weights.")
@@ -193,6 +193,9 @@ def make_env(seed: int, idx: int) -> gym.Env:
     def thunk() -> gym.Env:
         env = gym.make(ENV_ID)
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = gym.wrappers.ClipAction(env)
+        env = gym.wrappers.NormalizeObservation(env)
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env.action_space.seed(seed + idx)
         env.observation_space.seed(seed + idx)
         return env
