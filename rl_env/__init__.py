@@ -10,7 +10,7 @@ def _register_env() -> None:
         register(
             id="RedCubePick-v0",
             entry_point="rl_env.cube_robot_env:RedCubePickEnv",
-            max_episode_steps=200,
+            max_episode_steps=600,
         )
     except Exception:
         # Gymnasium raises an Error if the env is registered twice; swallow it.

@@ -22,8 +22,12 @@
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" solimp="0.95 0.99 0.001" solref="0.002 1"/>
 
     <body name="block" pos="0 -0.25 0.03">
+      <joint name="block_free" type="free"/>
       <geom type="box" size="0.025 0.025 0.025" density="100" material="red_block" solimp="0.95 0.99 0.001" solref="0.002 1"/>
-      <freejoint/>
+    </body>
+
+    <body name="target_zone" pos="0 -0.25 0.05">
+        <site name="target_site" type="sphere" size="0.03" rgba="0 1 0 0.3"/>
     </body>
     
   </worldbody>

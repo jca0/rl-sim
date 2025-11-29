@@ -3,12 +3,11 @@
 The task: pick the red cube at its fixed spawn pose and place it 5 cm to the
 left (negative X offset in the MuJoCo world frame). This environment exposes
 joint-space position control, shaped rewards, and RGB rendering suitable for
-training with PPO (e.g., via CleanRL).
+training with SAC or PPO via Stable Baselines3.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -21,19 +20,6 @@ from gymnasium import spaces
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_PATH = REPO_ROOT / "mujoco_sim" / "trs_so_arm100" / "scene.xml"
 TARGET_OFFSET = np.array([-0.05, 0.0, 0.0], dtype=np.float32)  # 5 cm to the left
-
-
-@dataclass
-class RewardTerms:
-    reach: float
-    place: float
-    ctrl: float
-    grasp_bonus: float
-    success_bonus: float
-
-    @property
-    def total(self) -> float:
-        return self.reach + self.place + self.ctrl + self.grasp_bonus + self.success_bonus
 
 
 class RedCubePickEnv(gym.Env):
@@ -71,8 +57,12 @@ class RedCubePickEnv(gym.Env):
 
         # Pre-compute control ranges (position actuators inherit joint ranges).
         ctrl_range = self.model.actuator_ctrlrange.copy()
+        print(f"ctrl_range: {ctrl_range}")
         self._ctrl_center = ctrl_range.mean(axis=1)
         self._ctrl_half_range = 0.5 * (ctrl_range[:, 1] - ctrl_range[:, 0])
+
+        # Gripper is the last actuator
+        self._gripper_ctrl_range = ctrl_range[-1]
 
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(self._arm_dofs,), dtype=np.float32
@@ -142,9 +132,30 @@ class RedCubePickEnv(gym.Env):
         if action.shape != (self._arm_dofs,):
             raise ValueError(f"Action must be shape {(self._arm_dofs,)}, got {action.shape}")
 
-        bounded = np.clip(action, -1.0, 1.0)
-        target_ctrl = self._ctrl_center + bounded * self._ctrl_half_range
-        self.data.ctrl[: self._arm_dofs] = target_ctrl
+        # 1. Arm control (indices 0..N-2): Map [-1, 1] -> [min, max]
+        # 2. Gripper control (index N-1): Binary 0 (open) or 1 (closed)
+        #    User input > 0.5 is interpreted as closed.
+        
+        # Split action
+        arm_action = action[:-1]
+        gripper_action_val = action[-1]
+
+        # Compute arm targets
+        bounded_arm = np.clip(arm_action, -1.0, 1.0)
+        target_arm_ctrl = (
+            self._ctrl_center[:-1] + bounded_arm * self._ctrl_half_range[:-1]
+        )
+
+        # Compute gripper target
+        # 0 -> Open (min range), 1 -> Closed (max range)
+        if gripper_action_val > 0.5:
+            target_gripper_ctrl = self._gripper_ctrl_range[1]  # Closed (max)
+        else:
+            target_gripper_ctrl = self._gripper_ctrl_range[0]  # Open (min)
+
+        # Apply to simulation
+        self.data.ctrl[:-1] = target_arm_ctrl
+        self.data.ctrl[-1] = target_gripper_ctrl
 
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
@@ -152,12 +163,12 @@ class RedCubePickEnv(gym.Env):
         self._elapsed_steps += 1
 
         # Pass action to compute_reward for regularization
-        reward_terms, success = self._compute_reward(action)
+        total_reward, reward_info, success = self._compute_reward(action)
         observation = self._get_obs()
         terminated = success
         truncated = self._elapsed_steps >= self._max_episode_steps
         info = {
-            "reward_terms": reward_terms.__dict__,
+            "reward_terms": reward_info,
             "cube_position": self.data.xpos[self._cube_body_id].copy(),
             "ee_position": self.data.xpos[self._ee_body_id].copy(),
             "target_position": self._target_pos.copy(),
@@ -167,7 +178,7 @@ class RedCubePickEnv(gym.Env):
         if self.render_mode == "rgb_array":
             self.render()
 
-        return observation, reward_terms.total, terminated, truncated, info
+        return observation, total_reward, terminated, truncated, info
 
     # ---------------------------------------------------------------- Utilities
     def _get_obs(self) -> np.ndarray:
@@ -187,61 +198,73 @@ class RedCubePickEnv(gym.Env):
             ]
         ).astype(np.float32)
 
-    def _compute_reward(self, action: np.ndarray) -> Tuple[RewardTerms, bool]:
+    def _compute_reward(self, action: np.ndarray) -> Tuple[float, Dict[str, float], bool]:
         assert self._cube_spawn_pos is not None
-        assert self._target_pos is not None
-
+        
         cube_pos = self.data.xpos[self._cube_body_id]
         ee_pos = self.data.xpos[self._ee_body_id]
 
         # Distance definitions
         d_reach = np.linalg.norm(ee_pos - cube_pos)
-        d_place = np.linalg.norm(cube_pos - self._target_pos)
-
+        
         # Check grasp status (Logic: is cube lifted off table?)
         # Threshold height 0.05 (table is at 0 in simulation world usually, but here cube starts at 0.03)
-        # User specified: is_grasped = pos_cube[2] > 0.05
         is_grasped = cube_pos[2] > 0.05
 
-        # Calculate components
+        # 1. Reach Reward
         r_reach = 1 - np.tanh(10.0 * d_reach)
-        r_place = 1 - np.tanh(10.0 * d_place)
         
         # Action penalty
         r_ctrl = -0.01 * np.square(action).sum()
 
-        # Composition
-        reach_val = 0.0
-        place_val = 0.0
-        grasp_bonus_val = 0.0
-        
-        # Grasp shaping: encourage closing gripper when near the cube
-        # We want the jaw (last joint) to be small (closed) when d_reach is small.
+        # Gripper shaping
+        # Identify gripper range: index 0 is Open, index 1 is Closed
+        min_g, max_g = self._gripper_ctrl_range
         jaw_pos = self.data.qpos[self._arm_dofs - 1]
-        proximity = 1.0 - np.tanh(10.0 * d_reach)
-        # jaw_pos ranges [0, 1.75], closed at 0.
-        closedness = np.exp(-2.0 * jaw_pos)
-        r_grasp_shaping = 0.5 * proximity * closedness
-
-        if is_grasped:
-            grasp_bonus_val = 2.0
-            place_val = r_place
+        
+        # Normalize to [0 (open), 1 (closed)]
+        # We clamp to handle small numerical violations
+        jaw_range = max_g - min_g
+        if jaw_range > 1e-8:
+            norm_jaw = np.clip((jaw_pos - min_g) / jaw_range, 0.0, 1.0)
         else:
-            reach_val = r_reach + r_grasp_shaping
+            norm_jaw = 0.0
+        
+        openness = 1.0 - norm_jaw
+        closedness = norm_jaw
+        proximity = 1.0 - np.tanh(10.0 * d_reach)
+        
+        # 1. Descend with open gripper: Reward openness when NOT close
+        # Weighted by (1 - proximity) so it applies when far
+        r_open_shaping = openness * (1.0 - proximity)
+        
+        # 2. Grasp: Reward closedness when close
+        # Weighted by proximity so it applies when close
+        r_close_shaping = closedness * proximity
+        
+        # Combined shaping (weight 0.5 to not overpower reach)
+        r_gripper_shaping = 0.5 * (r_open_shaping + r_close_shaping)
 
-        # Sparse success bonus
-        success = d_place < 0.05 and is_grasped
-        success_bonus_val = 10.0 if success else 0.0
+        # Composition
+        grasp_bonus_val = 0.0
+        success_bonus_val = 0.0
+        success = is_grasped
 
-        terms = RewardTerms(
-            reach=reach_val,
-            place=place_val,
-            ctrl=r_ctrl,
-            grasp_bonus=grasp_bonus_val,
-            success_bonus=success_bonus_val,
-        )
+        if success:
+            grasp_bonus_val = 2.0
+            success_bonus_val = 10.0
+        
+        total_reward = r_reach + r_ctrl + r_gripper_shaping + grasp_bonus_val + success_bonus_val
+        
+        reward_info = {
+            "reach": r_reach,
+            "ctrl": r_ctrl,
+            "gripper_shaping": r_gripper_shaping,
+            "grasp_bonus": grasp_bonus_val,
+            "success_bonus": success_bonus_val,
+        }
 
-        return terms, success
+        return total_reward, reward_info, success
 
     # ------------------------------------------------------------ Helper hooks
     def render(self) -> Optional[np.ndarray]:
