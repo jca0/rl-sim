@@ -67,6 +67,9 @@ class RedCubePickEnv(gym.Env):
         self.cube_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "block")
         self.ee_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "Moving_Jaw")
         self.home_key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, "home_with_cube")
+        self.fixed_jaw_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "Fixed_Jaw")
+        self.fixed_pad_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "fixed_jaw_pad_1")
+        self.moving_pad_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "moving_jaw_pad_1")
 
         # Cube freejoint slices
         jnt_adr = self.model.body_jntadr[self.cube_body_id]
@@ -156,42 +159,63 @@ class RedCubePickEnv(gym.Env):
 
         dist_ee_to_cube = np.linalg.norm(ee_pos - cube_pos)
         dist_cube_to_target = np.linalg.norm(cube_pos - target_pos)
-        is_lifted = cube_pos[2] > 0.05
-        is_placed = dist_cube_to_target < 0.03 and is_lifted
+        
+        GRASP_RADIUS = 0.02
 
-        # Reach reward
-        reach_reward = 1.0 - np.tanh(5.0 * dist_ee_to_cube)
+        # STEP 1: Reach towards cube
+        reward_reach = 1.0 - np.tanh(10.0 * dist_ee_to_cube)
 
-        # Control penalty
-        ctrl_penalty = -0.01 * np.sum(np.square(arm_action))
+        # STEP 2: Grasp cube
+        # Check gripper joint angle (index 5)
+        gripper_angle = self.data.qpos[-1]
+        target_angle = 0.585
+        angle_tolerance = 0.5
+        
+        is_at_grasp_angle = np.abs(gripper_angle - target_angle) < angle_tolerance
+        is_near_object = dist_ee_to_cube < 0.03 
+    
+        if is_at_grasp_angle and is_near_object and gripper_cmd == 1:
+            reward_grasp = 1.0
+        else:
+            reward_grasp = 0.0
 
-        # Gripper shaping
-        proximity = np.clip(1.0 - 5.0 * dist_ee_to_cube, 0.0, 1.0)
-        gripper_open = 1.0 if gripper_cmd == 0 else 0.0
-        gripper_closed = 1.0 - gripper_open
+        if reward_grasp > 0 and gripper_cmd == 1:
+            reward_lift = 3.0 * cube_pos[2]
+        else:
+            reward_lift = 0.0
 
-        r_open_when_far = gripper_open * (1.0 - proximity)
-        r_close_when_near = gripper_closed * proximity
-        gripper_shaping = 0.5 * (r_open_when_far + r_close_when_near)
+        reward_ctrl = -np.sum(np.square(arm_action)) * 0.1
+        
+        # Penalize high velocity of the cube (instability/flying away)
+        cube_vel = self.data.qvel[self.cube_qvel_adr : self.cube_qvel_adr + 3]
+        reward_cube_vel = -np.linalg.norm(cube_vel) * 0.07
 
-        # Bonuses
-        grasp_bonus = 2.0 if is_lifted else 0.0
-        place_bonus = 10.0 if is_placed else 0.0
+        # Orient gripper downwards
+        # Local Y-axis of Fixed_Jaw should align with global Z (up), because fingers point in -Y
+        fixed_jaw_mat = self.data.xmat[self.fixed_jaw_id].reshape(3, 3)
+        local_y_global = fixed_jaw_mat[:, 1]  # Global direction of local Y
+        reward_orientation = np.dot(local_y_global, np.array([0, 0, 1.0], dtype=np.float32)) 
+        # Range [-1, 1]. 1 = perfect down, -1 = perfect up (bad).
+        # Scale it to be a bonus
+        reward_orientation = max(0.0, reward_orientation) * 0.1
 
-        total = reach_reward + ctrl_penalty + gripper_shaping + grasp_bonus + place_bonus
-        success = bool(is_placed)
+        total_reward = reward_reach + reward_grasp + reward_lift + reward_ctrl + reward_cube_vel + reward_orientation
+
 
         info = {
-            "reward_reach": float(reach_reward),
-            "reward_ctrl": float(ctrl_penalty),
-            "reward_gripper_shaping": float(gripper_shaping),
-            "reward_grasp_bonus": float(grasp_bonus),
-            "reward_place_bonus": float(place_bonus),
+            "reward_reach": float(reward_reach),
+            "reward_grasp": float(reward_grasp),
+            "reward_lift": float(reward_lift),
+            "reward_ctrl": float(reward_ctrl),
+            "reward_cube_vel": float(reward_cube_vel),
+            "reward_orientation": float(reward_orientation),
             "dist_ee_cube": float(dist_ee_to_cube),
-            "dist_cube_target": float(dist_cube_to_target),
+            "gripper_angle": float(gripper_angle),
+            "in_grasp_zone": dist_ee_to_cube < GRASP_RADIUS,
+            "gripper_cmd": gripper_cmd
         }
 
-        return total, info, success
+        return total_reward, info, reward_grasp
 
     def current_joint_positions(self) -> np.ndarray:
         """Return the controllable joint positions (useful for logging)."""

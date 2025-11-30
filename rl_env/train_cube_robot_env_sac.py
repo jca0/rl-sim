@@ -4,8 +4,15 @@
 import argparse
 import json
 import time
+import glob
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from tensorboard.backend.event_processing import event_accumulator
 
 import gymnasium as gym
 import imageio.v3 as iio
@@ -148,6 +155,80 @@ class VideoAndJointLogCallback(BaseCallback):
         # self.logger.record("eval/video_path", str(video_path))
         
         print(f"[video] step={global_step} -> {video_path}")
+
+        # Plot losses
+        self.plot_losses(global_step)
+
+    def plot_losses(self, global_step: int):
+        """Reads TensorBoard logs and plots loss curves."""
+        log_dir = self.logger.get_dir()
+        if not log_dir:
+            return
+
+        # Find event file
+        event_files = glob.glob(os.path.join(log_dir, "events.out.tfevents.*"))
+        if not event_files:
+            # If not in the logger dir, check parent dir (sometimes logger dir is subfolder)
+            # But SB3 usually sets logger dir to specific algorithm folder
+            return
+        
+        # Use the most recent one
+        event_file = max(event_files, key=os.path.getmtime)
+        
+        try:
+            # Load scalars
+            ea = event_accumulator.EventAccumulator(
+                event_file,
+                size_guidance={event_accumulator.SCALARS: 0}, 
+            )
+            ea.Reload()
+            
+            tags = ea.Tags()["scalars"]
+            # Filter for typical SAC losses and reward
+            # train/actor_loss, train/critic_loss, train/ent_coef_loss, rollout/ep_rew_mean
+            relevant_tags = [
+                t for t in tags 
+                if any(k in t for k in ["loss", "ep_rew_mean", "entropy"])
+            ]
+            
+            if not relevant_tags:
+                return
+
+            # Plot
+            n_plots = len(relevant_tags)
+            cols = 2
+            rows = (n_plots + 1) // cols
+            if rows == 0: rows = 1
+            
+            fig, axes = plt.subplots(rows, cols, figsize=(12, 3 * rows))
+            if n_plots == 1:
+                axes_list = [axes]
+            else:
+                axes_list = axes.flatten()
+            
+            for i, tag in enumerate(relevant_tags):
+                data = ea.Scalars(tag)
+                steps = [x.step for x in data]
+                values = [x.value for x in data]
+                
+                ax = axes_list[i]
+                ax.plot(steps, values)
+                ax.set_title(tag)
+                ax.set_xlabel("Step")
+                ax.grid(True, alpha=0.3)
+                
+            # Hide unused subplots
+            for j in range(i + 1, len(axes_list)):
+                axes_list[j].axis('off')
+                
+            plt.tight_layout()
+            plot_path = self.video_dir / f"loss_step_{global_step:08d}.png"
+            plt.savefig(plot_path)
+            plt.close(fig)
+            print(f"[plot] Loss graph saved to {plot_path}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to plot losses: {e}")
 
 
 def main() -> None:

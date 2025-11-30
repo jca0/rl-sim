@@ -3,6 +3,7 @@ import mujoco
 from mujoco import MjModel, MjData, mj_resetDataKeyframe
 import mujoco.viewer as viewer
 import numpy as np
+import json
 
 JOINT_NAMES = ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
 JAW_OPEN = 1.75
@@ -22,7 +23,7 @@ ACTION_SEQUENCE = [
 
 def main():
     # Load the model and data
-    model = mujoco.MjModel.from_xml_path("trs_so_arm100/scene.xml")
+    model = mujoco.MjModel.from_xml_path("mujoco_sim/trs_so_arm100/scene.xml")
     data = mujoco.MjData(model)
 
     # Reset to the "home_with_cube" keyframe to ensure consistent start
@@ -35,6 +36,9 @@ def main():
     data.ctrl[:] = data.qpos[:6]
 
     print("\nStarting Pick and Place Script...")
+    
+    # Storage for joint positions
+    recorded_joints = []
 
     with mujoco.viewer.launch_passive(model, data) as gui:
         start_time = time.time()
@@ -85,6 +89,9 @@ def main():
             # --- 2. PHYSICS STEP ---
             mujoco.mj_step(model, data)
             gui.sync()
+            
+            # --- Record Joints ---
+            recorded_joints.append(data.qpos[:6].tolist())
 
             # --- 3. LOGGING HELPER ---
             # Print current positions every second to help you calibrate
@@ -97,6 +104,12 @@ def main():
             time_until_next_step = model.opt.timestep - (time.time() - step_start)
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
+
+    # Save recorded joints to JSON
+    output_file = "recorded_joint_positions.json"
+    with open(output_file, "w") as f:
+        json.dump(recorded_joints, f, indent=2)
+    print(f"Saved {len(recorded_joints)} frames to {output_file}")
 
 if __name__ == "__main__":
     main()
