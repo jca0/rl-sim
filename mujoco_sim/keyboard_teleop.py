@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def maybe_reset_keyframe(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-    key_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "rest_with_cube")
+    key_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home_with_cube")
     if key_id >= 0:
         mujoco.mj_resetDataKeyframe(model, data, key_id)
         mujoco.mj_forward(model, data)
@@ -148,7 +148,7 @@ def solve_position_ik(
 
 def pygame_loop(conn) -> None:
     pygame.init()
-    screen = pygame.display.set_mode((620, 320))
+    screen = pygame.display.set_mode((600, 400))
     pygame.display.set_caption("SO-100 keyboard teleop (focus here)")
     font = pygame.font.SysFont("Menlo", 17)
     clock = pygame.time.Clock()
@@ -163,8 +163,9 @@ def pygame_loop(conn) -> None:
         screen.fill((20, 20, 20))
         lines = [
             "SO-100 Keyboard Teleop",
-            "Arrow keys: translate X/Y | A/Z: translate Z | SHIFT: 3x speed",
-            "SPACE: toggle gripper | ESC: quit",
+            "Arrow keys: translate X/Y",
+            "A/Z: translate Z | SHIFT: 3x speed",
+            "SPACE: toggle gripper | R: reset | ESC: quit",
             f"Gripper: {'Closed' if gripper_closed else 'Open'}",
         ]
         lines.append(
@@ -203,6 +204,8 @@ def pygame_loop(conn) -> None:
                     running = False
                 elif event.key == pygame.K_SPACE:
                     conn.send({"type": "toggle_gripper"})
+                elif event.key == pygame.K_r:
+                    conn.send({"type": "reset"})
                 else:
                     pressed.add(event.key)
                     conn.send({"type": "keys", "keys": list(pressed)})
@@ -249,6 +252,7 @@ def main() -> None:
         running = True
         last_time = time.time()
         state_push_time = 0.0
+        last_joint_print_time = time.time()
         while running and gui.is_running():
             now = time.time()
             dt = max(1.0 / args.max_hz, now - last_time)
@@ -264,6 +268,15 @@ def main() -> None:
                 elif msg_type == "toggle_gripper":
                     gripper_closed = not gripper_closed
                     jaw_target = JAW_CLOSED if gripper_closed else JAW_OPEN
+                elif msg_type == "reset":
+                    maybe_reset_keyframe(model, data)
+                    # Sync internal state with the reset model state
+                    joint_targets = data.qpos[: ARM_JOINT_COUNT].copy()
+                    jaw_target = data.qpos[ARM_JOINT_COUNT]
+                    gripper_closed = jaw_target <= (JAW_OPEN + JAW_CLOSED) * 0.5
+                    mujoco.mj_forward(model, data)
+                    eef_target = data.xpos[eef_body_id].copy()
+                    ik_warning_printed = False
                 elif msg_type == "quit":
                     running = False
 
@@ -312,6 +325,12 @@ def main() -> None:
             gui.sync()
 
             now = time.time()
+            # Print joint positions every 5 seconds
+            if now - last_joint_print_time >= 1.0:
+                all_joints = list(joint_targets) + [jaw_target]
+                print(f"[{', '.join(f'{j:.3f}' for j in all_joints)}]")
+                last_joint_print_time = now
+
             if now - state_push_time > 1.0 / 15.0:
                 try:
                     parent_conn.send(
