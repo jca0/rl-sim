@@ -161,6 +161,7 @@ class RedCubePickEnv(gym.Env):
         dist_cube_to_target = np.linalg.norm(cube_pos - target_pos)
         
         GRASP_RADIUS = 0.02
+        TARGET_HEIGHT = 0.1
 
         # STEP 1: Reach towards cube
         reward_reach = 1.0 - np.tanh(10.0 * dist_ee_to_cube)
@@ -168,22 +169,24 @@ class RedCubePickEnv(gym.Env):
         # STEP 2: Grasp cube
         # Check gripper joint angle (index 5)
         gripper_angle = self.data.qpos[-1]
-        target_angle = 0.585
-        angle_tolerance = 0.5
+        target_angle = 0.565
+        angle_tolerance = 0.1
         
         is_at_grasp_angle = np.abs(gripper_angle - target_angle) < angle_tolerance
         is_near_object = dist_ee_to_cube < 0.03 
     
         if is_at_grasp_angle and is_near_object and gripper_cmd == 1:
-            reward_grasp = 1.0
+            reward_grasp = 2.0
         else:
-            reward_grasp = 0.0
+            reward_grasp = -1.0
 
-        if reward_grasp > 0 and gripper_cmd == 1:
-            reward_lift = 3.0 * cube_pos[2]
+        # STEP 3: Lift cube
+        if reward_grasp > 0 and gripper_cmd == 1 and cube_pos[2] < TARGET_HEIGHT:
+            reward_lift = 3.0 * (TARGET_HEIGHT - cube_pos[2])
         else:
             reward_lift = 0.0
 
+        # penalize high arm action
         reward_ctrl = -np.sum(np.square(arm_action)) * 0.1
         
         # Penalize high velocity of the cube (instability/flying away)
@@ -191,12 +194,9 @@ class RedCubePickEnv(gym.Env):
         reward_cube_vel = -np.linalg.norm(cube_vel) * 0.07
 
         # Orient gripper downwards
-        # Local Y-axis of Fixed_Jaw should align with global Z (up), because fingers point in -Y
         fixed_jaw_mat = self.data.xmat[self.fixed_jaw_id].reshape(3, 3)
         local_y_global = fixed_jaw_mat[:, 1]  # Global direction of local Y
         reward_orientation = np.dot(local_y_global, np.array([0, 0, 1.0], dtype=np.float32)) 
-        # Range [-1, 1]. 1 = perfect down, -1 = perfect up (bad).
-        # Scale it to be a bonus
         reward_orientation = max(0.0, reward_orientation) * 0.1
 
         total_reward = reward_reach + reward_grasp + reward_lift + reward_ctrl + reward_cube_vel + reward_orientation
