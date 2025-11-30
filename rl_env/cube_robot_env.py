@@ -129,7 +129,16 @@ class RedCubePickEnv(gym.Env):
         self._elapsed_steps += 1
 
         obs = self._get_obs()
-        reward, reward_info, success = self._compute_reward(arm_action, gripper_cmd)
+        # reward, reward_info = self._compute_reward(arm_action, gripper_cmd)
+        reward = 0.0
+        reward_info = {}
+        
+        # Define success: Cube lifted > 5 cm (0.05m)
+        # Note: Cube center starts at ~0.025m
+        cube_height = self.data.xpos[self.cube_body_id][2]
+        is_lifted = cube_height > 0.05
+        success = is_lifted
+        
         terminated = success
         truncated = self._elapsed_steps >= self._max_episode_steps
         info = {
@@ -137,7 +146,7 @@ class RedCubePickEnv(gym.Env):
             "target_position": self._target_pos.copy(),
             "cube_position": self.data.xpos[self.cube_body_id].copy(),
             "ee_position": self.data.xpos[self.ee_body_id].copy(),
-            **reward_info,
+            # **reward_info,
         }
 
         return obs, reward, terminated, truncated, info
@@ -181,8 +190,8 @@ class RedCubePickEnv(gym.Env):
             reward_grasp = -1.0
 
         # STEP 3: Lift cube
-        if reward_grasp > 0 and gripper_cmd == 1 and cube_pos[2] < TARGET_HEIGHT:
-            reward_lift = 3.0 * (TARGET_HEIGHT - cube_pos[2])
+        if reward_grasp > 0 and gripper_cmd == 1:
+            reward_lift = 3.0 * cube_pos[2]
         else:
             reward_lift = 0.0
 

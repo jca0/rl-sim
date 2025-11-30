@@ -110,31 +110,64 @@ def collect_demonstrations(
     env_unwrapped = env.unwrapped
     ctrl_low = env_unwrapped.ctrl_low
     ctrl_high = env_unwrapped.ctrl_high
+    dt = env_unwrapped.dt
+    
+    # Interpolation settings
+    JOINT_SPEED = 1.5  # rad/s
+    GRIPPER_TIME = 0.5 # seconds for grasp/release
+    MIN_MOVE_TIME = 0.2 # seconds
+    
+    print(f"Collecting data with dt={dt:.4f}, joint_speed={JOINT_SPEED}")
     
     for seq_idx, sequence in enumerate(sequences):
         obs, _ = env.reset(seed=seed + seq_idx)
         
-        for action_idx, action_raw in enumerate(sequence):
-            # Convert raw joint positions to normalized actions
-            joint_pos = np.array(action_raw, dtype=np.float32)
+        # We assume the robot starts at the first waypoint (Home)
+        # But we should check/enforce it?
+        # For now, just assume the sequence starts from where reset leaves us (Home)
+        
+        for i in range(len(sequence) - 1):
+            start_pose = np.array(sequence[i], dtype=np.float32)
+            end_pose = np.array(sequence[i+1], dtype=np.float32)
             
-            # Convert to normalized action
-            normalized_action = joint_pos_to_normalized_action(
-                joint_pos, ctrl_low, ctrl_high
-            )
+            # Determine if this is a move or a grasp
+            joint_dist = np.linalg.norm(start_pose[:5] - end_pose[:5])
+            gripper_dist = abs(start_pose[-1] - end_pose[-1])
             
-            # Store (obs, action) pair BEFORE stepping
-            observations.append(obs.copy())
-            actions.append(normalized_action.copy())
+            if joint_dist < 0.01 and gripper_dist > 0.1:
+                # Grasp/Release action
+                duration = GRIPPER_TIME
+            else:
+                # Move action
+                duration = max(joint_dist / JOINT_SPEED, MIN_MOVE_TIME)
             
-            # Step environment
-            obs, _, terminated, truncated, _ = env.step(normalized_action)
+            steps = int(duration / dt)
+            steps = max(steps, 1)
             
-            # Continue even if terminated/truncated to collect all demonstration data
-            # But break if we've exhausted the sequence
-            if action_idx == len(sequence) - 1:
+            # Linear interpolation
+            for s in range(steps):
+                # Calculate target for this step
+                alpha = (s + 1) / steps
+                target_pose = start_pose + (end_pose - start_pose) * alpha
+                
+                # Convert to normalized action
+                normalized_action = joint_pos_to_normalized_action(
+                    target_pose, ctrl_low, ctrl_high
+                )
+                
+                # Record current observation
+                observations.append(obs.copy())
+                actions.append(normalized_action.copy())
+                
+                # Step environment
+                obs, _, terminated, truncated, _ = env.step(normalized_action)
+                
+                if terminated or truncated:
+                    break
+            
+            if terminated or truncated:
                 break
-    
+                
     return np.array(observations), np.array(actions)
 
 
