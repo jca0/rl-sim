@@ -41,6 +41,20 @@ class RedCubePickEnv(gym.Env):
 
         self.model = mujoco.MjModel.from_xml_path(str(scene_path))
         self.data = mujoco.MjData(self.model)
+        
+        # INCREASE GRIPPER GAINS FOR STABILITY
+        # Find the actuator for the jaw
+        for i in range(self.model.nu):
+            if "Jaw" in self.model.actuator(i).name:
+                # Boost Kp from 50 to 500
+                self.model.actuator_gainprm[i, 0] = 500.0
+                self.model.actuator_biasprm[i, 1] = -500.0
+                # Boost Force Range from 3.5 to 10.0
+                self.model.actuator_ctrlrange[i, :] = [-0.174, 1.75] # This is pos range
+                # To boost force, we usually edit actuator_forcerange if it exists, 
+                # but position actuators usually rely on gain/bias.
+                # Let's just boost the KP.
+        
         self.dt = self.model.opt.timestep * self.frame_skip
 
         assert self.model.nu == 6, f"Expected 6 actuators, got {self.model.nu}"
@@ -102,10 +116,7 @@ class RedCubePickEnv(gym.Env):
         action = np.asarray(action, dtype=np.float32).flatten()
         
         arm_action = np.clip(action[:self.n_arm], -1.0, 1.0)
-        gripper_raw = action[-1]
-        
-        # Threshold gripper: > 0.0 -> Close (1), <= 0.0 -> Open (0)
-        gripper_cmd = 1 if gripper_raw > 0.0 else 0
+        gripper_action = np.clip(action[-1], -1.0, 1.0)
 
         # Map normalized arm action [-1, 1] → joint position range
         target_arm_pos = (
@@ -113,10 +124,14 @@ class RedCubePickEnv(gym.Env):
             0.5 * (self.ctrl_high[:self.n_arm] - self.ctrl_low[:self.n_arm]) * arm_action
         )
 
-        # Binary gripper → open or closed position
+        # Map normalized gripper action [-1, 1] → gripper position range (CONTINUOUS!)
         target_gripper_pos = (
-            self.ctrl_high[-1] if gripper_cmd == 1 else self.ctrl_low[-1]
+            0.5 * (self.ctrl_low[-1] + self.ctrl_high[-1]) +
+            0.5 * (self.ctrl_high[-1] - self.ctrl_low[-1]) * gripper_action
         )
+        
+        # For reward computation, determine if gripper is "closing" (for compatibility)
+        gripper_cmd = 1 if gripper_action > 0.0 else 0
 
         # Apply control
         self.data.ctrl[:self.n_arm] = target_arm_pos
@@ -129,9 +144,7 @@ class RedCubePickEnv(gym.Env):
         self._elapsed_steps += 1
 
         obs = self._get_obs()
-        # reward, reward_info = self._compute_reward(arm_action, gripper_cmd)
-        reward = 0.0
-        reward_info = {}
+        reward, reward_info = self._compute_reward(arm_action, gripper_cmd)
         
         # Define success: Cube lifted > 5 cm (0.05m)
         # Note: Cube center starts at ~0.025m
@@ -146,7 +159,7 @@ class RedCubePickEnv(gym.Env):
             "target_position": self._target_pos.copy(),
             "cube_position": self.data.xpos[self.cube_body_id].copy(),
             "ee_position": self.data.xpos[self.ee_body_id].copy(),
-            # **reward_info,
+            **reward_info,
         }
 
         return obs, reward, terminated, truncated, info
@@ -175,23 +188,22 @@ class RedCubePickEnv(gym.Env):
         # STEP 1: Reach towards cube
         reward_reach = 1.0 - np.tanh(10.0 * dist_ee_to_cube)
 
-        # STEP 2: Grasp cube
-        # Check gripper joint angle (index 5)
-        gripper_angle = self.data.qpos[-1]
-        target_angle = 0.565
-        angle_tolerance = 0.1
+        # STEP 2: Grasp reward (simplified)
+        # Reward simply for having the gripper closed near the object
+        # We trust the physics: if we close near object and lift, it works
+        is_near_object = dist_ee_to_cube < 0.03
         
-        is_at_grasp_angle = np.abs(gripper_angle - target_angle) < angle_tolerance
-        is_near_object = dist_ee_to_cube < 0.03 
-    
-        if is_at_grasp_angle and is_near_object and gripper_cmd == 1:
-            reward_grasp = 2.0
+        if is_near_object and gripper_cmd == 1:
+            reward_grasp = 1.0
         else:
-            reward_grasp = -1.0
+            reward_grasp = 0.0
 
         # STEP 3: Lift cube
-        if reward_grasp > 0 and gripper_cmd == 1:
-            reward_lift = 3.0 * cube_pos[2]
+        # This is the most important part
+        if cube_pos[2] > 0.05: # Lifted > 5cm
+            reward_lift = 5.0
+        elif cube_pos[2] > 0.03: # Lifted slightly (start of lift)
+            reward_lift = 1.0
         else:
             reward_lift = 0.0
 
@@ -208,23 +220,33 @@ class RedCubePickEnv(gym.Env):
         reward_orientation = np.dot(local_y_global, np.array([0, 0, 1.0], dtype=np.float32)) 
         reward_orientation = max(0.0, reward_orientation) * 0.1
 
-        total_reward = reward_reach + reward_grasp + reward_lift + reward_ctrl + reward_cube_vel + reward_orientation
+        # STEP 4: Place reward (GATED by lift)
+        # Only reward moving to target if we have lifted the object
+        # This prevents "bulldozing" (pushing along the ground)
+        if cube_pos[2] > 0.03: # Only if lifted > 3cm
+            dist_cube_to_target = np.linalg.norm(cube_pos - target_pos)
+            reward_place = 1.0 - np.tanh(5.0 * dist_cube_to_target)
+            reward_place *= 5.0 # Big bonus for placing
+        else:
+            reward_place = 0.0
+
+        total_reward = reward_reach + reward_grasp + reward_lift + reward_place + reward_ctrl + reward_cube_vel + reward_orientation
 
 
         info = {
             "reward_reach": float(reward_reach),
             "reward_grasp": float(reward_grasp),
             "reward_lift": float(reward_lift),
+            "reward_place": float(reward_place),
             "reward_ctrl": float(reward_ctrl),
             "reward_cube_vel": float(reward_cube_vel),
             "reward_orientation": float(reward_orientation),
             "dist_ee_cube": float(dist_ee_to_cube),
-            "gripper_angle": float(gripper_angle),
             "in_grasp_zone": dist_ee_to_cube < GRASP_RADIUS,
             "gripper_cmd": gripper_cmd
         }
 
-        return total_reward, info, reward_grasp
+        return total_reward, info
 
     def current_joint_positions(self) -> np.ndarray:
         """Return the controllable joint positions (useful for logging)."""

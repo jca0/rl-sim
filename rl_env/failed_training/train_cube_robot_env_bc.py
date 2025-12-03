@@ -19,7 +19,7 @@ import rl_env  # registers the env
 
 ENV_ID = "RedCubePick-v0"
 VIDEO_FPS = 30
-EVAL_MAX_STEPS = 600
+EVAL_MAX_STEPS = 200  # ~6.6 seconds @ 30fps
 
 
 class BCDataset(Dataset):
@@ -212,13 +212,14 @@ def evaluate_policy(
     max_steps: int = EVAL_MAX_STEPS,
     device: str = "cpu",
     min_steps: int = 30
-) -> Tuple[List[np.ndarray], float]:
-    """Evaluate policy and return frames and total reward."""
+) -> Tuple[List[np.ndarray], float, bool]:
+    """Evaluate policy and return frames, total reward, and success flag."""
     model.eval()
     obs, _ = env.reset(seed=seed)
     
     frames = []
     total_reward = 0.0
+    success = False
     
     # Render initial frame
     frame = env.render()
@@ -238,6 +239,10 @@ def evaluate_policy(
             obs, reward, term, trun, info = env.step(action)
             total_reward += float(reward)
             
+            # Check success
+            if info.get("is_success", False):
+                success = True
+            
             # Update termination flags
             terminated = terminated or bool(term)
             truncated = truncated or bool(trun)
@@ -251,10 +256,7 @@ def evaluate_policy(
             if (terminated or truncated) and step >= min_steps:
                 break
     
-    print(f"Captured {len(frames)} frames, episode length: {step + 1}, terminated: {terminated}, truncated: {truncated}")
-    if info:
-        print(f"Info: {info}")
-    return frames, total_reward
+    return frames, total_reward, success
 
 
 def parse_args() -> argparse.Namespace:
@@ -273,6 +275,8 @@ def parse_args() -> argparse.Namespace:
                        help="Learning rate")
     parser.add_argument("--hidden-dim", type=int, default=256,
                        help="Hidden dimension for MLP")
+    parser.add_argument("--n-eval-episodes", type=int, default=5,
+                       help="Number of evaluation episodes")
     parser.add_argument("--output-dir", type=str, default="runs")
     return parser.parse_args()
 
@@ -337,16 +341,21 @@ def main() -> None:
     torch.save(model.state_dict(), model_path)
     print(f"Model saved to {model_path}")
     
-    # Evaluate and save video
-    print("Evaluating policy...")
+    # Evaluate multiple episodes
+    print(f"\nEvaluating {args.n_eval_episodes} episodes...")
     eval_env = gym.make(ENV_ID, render_mode="rgb_array")
-    frames, total_reward = evaluate_policy(
-        model, eval_env, seed=args.seed, device=device
+    
+    successes = 0
+    for ep in range(args.n_eval_episodes):
+        frames, reward, success = evaluate_policy(
+            model, eval_env, seed=args.seed + ep, device=device
     )
-    eval_env.close()
+        
+        if success:
+            successes += 1
     
     if frames:
-        video_path = video_dir / "final_policy.mp4"
+            video_path = video_dir / f"eval_ep{ep}_reward{reward:.1f}.mp4"
         iio.imwrite(
             video_path, 
             np.asarray(frames), 
@@ -354,11 +363,13 @@ def main() -> None:
             codec="libx264", 
             quality=8
         )
-        print(f"Video saved to {video_path}")
-        print(f"Total reward: {total_reward:.2f}")
+            print(f"  Ep {ep}: Reward={reward:.2f}, Success={success}, Video={video_path.name}")
     else:
-        print("Warning: No frames captured!")
+            print(f"  Ep {ep}: No frames captured!")
     
+    print(f"\nSuccess rate: {successes}/{args.n_eval_episodes} ({100*successes/args.n_eval_episodes:.0f}%)")
+    
+    eval_env.close()
     env.close()
     print("Done!")
 
